@@ -8,12 +8,29 @@ import numpy as np
 
 # Step 1 - stable_softmax
 # TODO: implement
+def stable_softmax(logits):
+    max_val = logits.max(axis=-1,keepdims=True)
+    shifted = logits-max_val
 
+    exp_vals = np.exp(shifted)
+    
+    sum_vals = exp_vals.sum(axis=-1,keepdims=True)
+    probs = exp_vals / sum_vals
+    return probs
 # Step 2 - apply_temperature
 # TODO: implement
+def apply_temperature(logits,temperature):
+    return logits / temperature
 
 # Step 3 - top_k_filter
 # TODO: implement
+def tok_k_filter(logits,k):
+    sorted_logits = np.sort(logits,axis=-1)
+    threshold = sorted_logits[...,-k]
+    threshold = threshold[...,np.newaxis]
+
+    result = np.where(logits < threshold,-np.inf,logits)
+    return result
 
 # Step 4 - top_p_filter
 # TODO: implement
