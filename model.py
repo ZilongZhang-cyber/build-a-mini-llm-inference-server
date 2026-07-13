@@ -17,6 +17,7 @@ def stable_softmax(logits):
     sum_vals = exp_vals.sum(axis=-1,keepdims=True)
     probs = exp_vals / sum_vals
     return probs
+
 # Step 2 - apply_temperature
 # TODO: implement
 def apply_temperature(logits,temperature):
@@ -24,7 +25,7 @@ def apply_temperature(logits,temperature):
 
 # Step 3 - top_k_filter
 # TODO: implement
-def tok_k_filter(logits,k):
+def top_k_filter(logits, k):
     sorted_logits = np.sort(logits,axis=-1)
     threshold = sorted_logits[...,-k]
     threshold = threshold[...,np.newaxis]
@@ -34,6 +35,20 @@ def tok_k_filter(logits,k):
 
 # Step 4 - top_p_filter
 # TODO: implement
+def top_p_filter(logits,p):
+    probs = stable_softmax(logits)
+
+    sorted_idx = np.argsort(-probs,axis=-1)
+    sorted_probs = np.take_along_axis(probs,sorted_idx,axis=-1)
+
+    cumsum = np.cumsum(sorted_probs,axis=-1)
+
+    sorted_keep = (cumsum - sorted_probs) < p
+
+    keep_mask = np.zeros_like(probs,dtype=bool)
+    np.put_along_axis(keep_mask,sorted_idx,sorted_keep,axis=-1)
+
+    return np.where(keep_mask,logits,-np.inf)
 
 # Step 5 - sample_from_probs
 # TODO: implement
