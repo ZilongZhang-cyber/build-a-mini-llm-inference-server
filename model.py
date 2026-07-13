@@ -52,40 +52,161 @@ def top_p_filter(logits,p):
 
 # Step 5 - sample_from_probs
 # TODO: implement
-
+def sample_from_probs(probs,rng):
+    return rng.choice(len(probs),p=probs)
 # Step 6 - greedy_select
 # TODO: implement
-
-# Step 7 - build_vocab (not yet solved)
+def greedy_select(logits):
+    return logits.argmax(axis = -1)
+# Step 7 - build_vocab
 # TODO: implement
+def build_vocab(corpus,specials):
+    #拆分句子
+    all_words = []
+    for sentence in corpus:
+        all_words.extend(sentence.split())
+    
+    #去重
+    seen = set()
+    unique_words = []
+    for word in all_words:
+        if word not in seen:
+            seen.add(word)
+            unique_words.append(word)
+    
+    #特殊符号token编号
+    token_to_id = {}
+    id_to_token = {}
+    for i,tok in enumerate(specials):
+        token_to_id[tok] = i
+        id_to_token[i]   = tok
+    
+    #普通单词后面编号
+    for word in unique_words:
+        idx = len(token_to_id)
+        token_to_id[word] = idx
+        id_to_token[idx]  = word
+    
+    return {"token_to_id":token_to_id,"id_to_token":id_to_token}
 
-# Step 8 - encode_prompt (not yet solved)
+
+# Step 8 - encode_prompt
 # TODO: implement
+def encode_prompt(prompt,vocab,add_bos = True):
+    token_to_id = vocab["token_to_id"]
+    unk_id = token_to_id["<unk>"]
 
-# Step 9 - decode_tokens (not yet solved)
+    words = prompt.split()
+    
+    ids = []
+    for word in words:
+        if word in token_to_id:
+            ids.append(token_to_id[word])
+        else:
+            ids.append(unk_id)
+    
+    if(add_bos):
+        bos_id = token_to_id["<bos>"]
+        ids = [bos_id] + ids
+    
+    return ids
+
+# Step 9 - decode_tokens
 # TODO: implement
+def decode_tokens(token_ids,vocab,skip_special=True):
+    id_to_token = vocab["id_to_token"]
+    specials = {"<pad>","<bos>","<eos>","<unk>"}
 
-# Step 10 - embed_tokens (not yet solved)
+    words = []
+    for tid in token_ids:
+        token = id_to_token[tid]
+        if skip_special and token in specials:
+            continue
+        words.append(token)
+    
+    return " ".join(words)
+
+# Step 10 - embed_tokens
 # TODO: implement
-
-# Step 11 - linear_projection (not yet solved)
+def embed_tokens(token_ids,embedding_matrix):
+    return embedding_matrix[token_ids]
+# Step 11 - linear_projection
 # TODO: implement
-
-# Step 12 - init_kv_cache (not yet solved)
+def linear_projection(hidden,W_out):
+    return hidden @ W_out
+# Step 12 - init_kv_cache
 # TODO: implement
+def init_kv_cache(max_seq_len,d_model):
+    return {
+        "K":np.zeros((max_seq_len,d_model)),
+        "V":np.zeros((max_seq_len,d_model))
+    }
 
-# Step 13 - append_kv (not yet solved)
+# Step 13 - append_kv
 # TODO: implement
-
-# Step 14 - causal_attention (not yet solved)
+def append_kv(cache,K_new,V_new,pos):
+    cache["K"][pos] = K_new
+    cache["V"][pos] = V_new
+    return cache
+# Step 14 - causal_attention
 # TODO: implement
+def causal_attention(X,Wq,Wk,Wv,Wo,cache=None,pos=0):
+    d_model = X.shape[-1]
+    seq_len = X.shape[0]
 
-# Step 15 - model_prefill (not yet solved)
+    Q     = X @ Wq
+    K_new = X @ Wk
+    V_new = X @ Wv
+
+    if cache is not None and pos>0 :
+        K_all = np.concatenate([cache["K"][:pos],K_new],axis = 0)
+        V_all = np.concatenate([cache["V"][:pos],V_new],axis = 0)
+    else:
+        K_all = K_new
+        V_all = V_new
+    
+    scale = 1.0 / np.sqrt(d_model)
+    scores = Q @ K_all.T * scale
+
+    q_positions = np.arange(pos,pos + seq_len).reshape(-1,1)#列向量控制的是行数
+    k_positions = np.arange(K_all.shape[0]).reshape(1,-1)   #行向量控制的是列数
+    mask = k_positions > q_positions                        #自动进行广播，广播成矩阵
+    scores = np.where(mask,-np.inf,scores)                  #where(条件，A，B)
+
+    attn = stable_softmax(scores)
+    hidden = attn @ V_all
+    output = hidden @ Wo
+    
+    if cache is not None:
+        for i in range(seq_len):
+            cache["K"][pos+i] = K_new[i]
+            cache["V"][pos+i] = V_new[i]
+
+    return output
+
+# Step 15 - model_prefill
 # TODO: implement
-
-# Step 16 - model_decode_step (not yet solved)
+def model_prefill(token_ids,params,cache):
+    X = embed_tokens(token_ids,params["embedding"])
+    output = causal_attention(X,
+                              params["Wq"],params["Wk"],params["Wv"],params["Wo"],
+                              cache = cache,
+                              pos = 0)
+    last_hidden = output[-1]
+    logits = linear_projection(last_hidden,params["W_out"])
+    return logits
+# Step 16 - model_decode_step
 # TODO: implement
-
+def model_decode_step(token_id,params,cache,pos):
+    X = embed_tokens(np.array([token_id]),params["embedding"])
+    output = causal_attention(
+        X,
+        params["Wq"],params["Wk"],params["Wv"],params["Wo"],
+        cache = cache,
+        pos = pos
+    )
+    logits = linear_projection(output[0],params["W_out"])
+    return logits
 # Step 17 - blocks_needed (not yet solved)
 # TODO: implement
 

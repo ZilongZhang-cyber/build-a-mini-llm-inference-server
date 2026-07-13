@@ -14,12 +14,12 @@ python scaffold.py
 - [x] **2.** apply_temperature
 - [x] **3.** top_k_filter
 - [x] **4.** top_p_filter
-- [ ] **5.** sample_from_probs
-- [ ] **6.** greedy_select
-- [ ] **7.** build_vocab
-- [ ] **8.** encode_prompt
-- [ ] **9.** decode_tokens
-- [ ] **10.** embed_tokens
+- [x] **5.** sample_from_probs
+- [x] **6.** greedy_select
+- [x] **7.** build_vocab
+- [x] **8.** encode_prompt
+- [x] **9.** decode_tokens
+- [x] **10.** embed_tokens
 - [ ] **11.** linear_projection
 - [ ] **12.** init_kv_cache
 - [ ] **13.** append_kv
