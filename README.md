@@ -20,12 +20,12 @@ python scaffold.py
 - [x] **8.** encode_prompt
 - [x] **9.** decode_tokens
 - [x] **10.** embed_tokens
-- [ ] **11.** linear_projection
-- [ ] **12.** init_kv_cache
-- [ ] **13.** append_kv
-- [ ] **14.** causal_attention
-- [ ] **15.** model_prefill
-- [ ] **16.** model_decode_step
+- [x] **11.** linear_projection
+- [x] **12.** init_kv_cache
+- [x] **13.** append_kv
+- [x] **14.** causal_attention
+- [x] **15.** model_prefill
+- [x] **16.** model_decode_step
 - [ ] **17.** blocks_needed
 - [ ] **18.** init_block_allocator
 - [ ] **19.** allocate_block
