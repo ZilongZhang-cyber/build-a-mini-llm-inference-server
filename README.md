@@ -26,19 +26,19 @@ python scaffold.py
 - [x] **14.** causal_attention
 - [x] **15.** model_prefill
 - [x] **16.** model_decode_step
-- [ ] **17.** blocks_needed
-- [ ] **18.** init_block_allocator
-- [ ] **19.** allocate_block
-- [ ] **20.** free_block
-- [ ] **21.** append_to_paged_cache
-- [ ] **22.** gather_kv_from_blocks
-- [ ] **23.** paged_attention_step
-- [ ] **24.** free_sequence_blocks
-- [ ] **25.** kv_blocks_in_use
-- [ ] **26.** make_request
-- [ ] **27.** init_sequence_state
-- [ ] **28.** sequence_decode_step
-- [ ] **29.** is_sequence_done
+- [x] **17.** blocks_needed
+- [x] **18.** init_block_allocator
+- [x] **19.** allocate_block
+- [x] **20.** free_block
+- [x] **21.** append_to_paged_cache
+- [x] **22.** gather_kv_from_blocks
+- [x] **23.** paged_attention_step
+- [x] **24.** free_sequence_blocks
+- [x] **25.** kv_blocks_in_use
+- [x] **26.** make_request
+- [x] **27.** init_sequence_state
+- [x] **28.** sequence_decode_step
+- [x] **29.** is_sequence_done
 - [ ] **30.** generate_single_sequence
 - [ ] **31.** build_batch_step_input
 - [ ] **32.** batched_decode_step

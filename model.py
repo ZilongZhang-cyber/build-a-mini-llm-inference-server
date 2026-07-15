@@ -148,6 +148,7 @@ def append_kv(cache,K_new,V_new,pos):
     cache["K"][pos] = K_new
     cache["V"][pos] = V_new
     return cache
+
 # Step 14 - causal_attention
 # TODO: implement
 def causal_attention(X,Wq,Wk,Wv,Wo,cache=None,pos=0):
@@ -195,6 +196,7 @@ def model_prefill(token_ids,params,cache):
     last_hidden = output[-1]
     logits = linear_projection(last_hidden,params["W_out"])
     return logits
+
 # Step 16 - model_decode_step
 # TODO: implement
 def model_decode_step(token_id,params,cache,pos):
@@ -207,43 +209,150 @@ def model_decode_step(token_id,params,cache,pos):
     )
     logits = linear_projection(output[0],params["W_out"])
     return logits
-# Step 17 - blocks_needed (not yet solved)
-# TODO: implement
 
-# Step 18 - init_block_allocator (not yet solved)
+# Step 17 - blocks_needed
 # TODO: implement
+def blocks_needed(seq_len,block_size):
+    return (seq_len + block_size -1) // block_size
 
-# Step 19 - allocate_block (not yet solved)
+# Step 18 - init_block_allocator
 # TODO: implement
+def init_block_allocator(num_blocks,block_size,d_model):
+    return {
+        "free_blocks" : list(range(num_blocks)),
+        "block_size" : block_size,
+        "d_model" : d_model,
+        "num_blocks" : num_blocks
+    }
 
-# Step 20 - free_block (not yet solved)
+# Step 19 - allocate_block
 # TODO: implement
+def allocate_block(allocator):
+    if not allocator["free_blocks"]:
+        return None
+    block_id = allocator["free_blocks"].pop(0)
 
-# Step 21 - append_to_paged_cache (not yet solved)
+    return {
+        "id" : block_id,
+        "K" : np.zeros((allocator["block_size"],allocator["d_model"])),
+        "V" : np.zeros((allocator["block_size"],allocator["d_model"]))
+    }
+
+# Step 20 - free_block
 # TODO: implement
+def free_block(allocator,block):
+    block_id = block["id"]
+    allocator["free_blocks"].append(block_id)
 
-# Step 22 - gather_kv_from_blocks (not yet solved)
+# Step 21 - append_to_paged_cache
 # TODO: implement
-
-# Step 23 - paged_attention_step (not yet solved)
+def append_to_paged_cache(blocks,K_new,V_new,pos,block_size):
+    block_id = pos // block_size
+    offset = pos % block_size
+    blocks[block_id]["K"][offset] = K_new
+    blocks[block_id]["V"][offset] = V_new
+ 
+# Step 22 - gather_kv_from_blocks
 # TODO: implement
+def gather_kv_from_blocks(blocks,seq_len,block_size):
+    K_parts = []
+    V_parts = []
+    remaining = seq_len
+    for block in blocks:
+        if remaining <= 0:
+            break
+        take = min(remaining,block_size)
+        K_parts.append(block["K"][:take])
+        V_parts.append(block["V"][:take])
+        remaining -= take
+    
+    return np.concatenate(K_parts,axis = 0),np.concatenate(V_parts,axis = 0)
 
-# Step 24 - free_sequence_blocks (not yet solved)
+# Step 23 - paged_attention_step
 # TODO: implement
+def paged_attention_step(X,Wq,Wk,Wv,Wo,blocks,seq_len,block_size):
+    Q = X @ Wq
+    K_new = X @ Wk
+    V_new = X @ Wv
 
-# Step 25 - kv_blocks_in_use (not yet solved)
+    K_hist,V_hist = gather_kv_from_blocks(blocks,seq_len,block_size)
+
+    K_all = np.concatenate([K_hist,K_new],axis = 0)
+    V_all = np.concatenate([V_hist,V_new],axis = 0)
+
+    scale = 1.0 / np.sqrt(X.shape[-1])
+    scores = Q @ K_all.T *scale
+
+    attn = stable_softmax(scores)
+    hidden = attn @ V_all
+    output = hidden @ Wo
+
+    append_to_paged_cache(blocks,K_new[0],V_new[0],seq_len,block_size)
+
+    return output
+
+# Step 24 - free_sequence_blocks
 # TODO: implement
+def free_sequence_blocks(allocator,blocks):
+    for block in blocks:
+        free_block(allocator,block)
 
-# Step 26 - make_request (not yet solved)
+# Step 25 - kv_blocks_in_use
 # TODO: implement
+def kv_block_in_use(allocator):
+    return allocator["num_blocks"] - len(allocator["free_blocks"])
 
-# Step 27 - init_sequence_state (not yet solved)
+# Step 26 - make_request
 # TODO: implement
+def make_request(request_id,prompt_ids,max_new_token,sampling_params):
+    return {
+        "id" : request_id,
+        "prompt_ids" : prompt_ids,
+        "max_new_token" : max_new_token,
+        "sampling_params" : sampling_params
+    }
 
-# Step 28 - sequence_decode_step (not yet solved)
+# Step 27 - init_sequence_state
 # TODO: implement
+def init_sequence_state(request,allocator,eos_id):
+    prompt_ids = request["prompt_ids"]
+    block_size = allocator["block_size"]
 
-# Step 29 - is_sequence_done (not yet solved)
+    n_blocks = blocks_needed(len(prompt_ids),block_size)
+    
+    blocks = []
+    for _ in range(n_blocks):
+        blk = allocate_block(allocator)
+        blocks.append(blk)
+    
+    return {
+        "request" : request,
+        "blocks" : blocks,
+        "pos" : len(prompt_ids),
+        "output_ids" : [],
+        "done" : False,
+        "eos_token_id" : eos_id
+    }
+
+# Step 28 - sequence_decode_step
+# TODO: implement
+def sequence_decode_step(token_id,sequence_state,params):
+    X = embed_tokens(np.array([token_id]),params["embedding"])
+
+    hidden = paged_attention_step(
+        X,
+        params["Wq"],params["Wk"],params["Wv"],params["Wo"],
+        blocks = sequence_state["blocks"],
+        seq_len = sequence_state["pos"],
+        block_size = params.get("block_size",8)
+    )
+    
+    logits = linear_projection(hidden[0],params["W_out"])
+
+    sequence_state["pos"] += 1
+    return logits
+    
+# Step 29 - is_sequence_done
 # TODO: implement
 
 # Step 30 - generate_single_sequence (not yet solved)
