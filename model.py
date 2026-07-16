@@ -5,6 +5,7 @@ Assembled from your step-by-step solutions.
 """
 
 import numpy as np
+import time
 
 # Step 1 - stable_softmax
 # TODO: implement
@@ -299,16 +300,16 @@ def free_sequence_blocks(allocator,blocks):
 
 # Step 25 - kv_blocks_in_use
 # TODO: implement
-def kv_block_in_use(allocator):
+def kv_blocks_in_use(allocator):
     return allocator["num_blocks"] - len(allocator["free_blocks"])
 
 # Step 26 - make_request
 # TODO: implement
-def make_request(request_id,prompt_ids,max_new_token,sampling_params):
+def make_request(request_id,prompt_ids,max_new_tokens,sampling_params):
     return {
         "id" : request_id,
         "prompt_ids" : prompt_ids,
-        "max_new_token" : max_new_token,
+        "max_new_tokens" : max_new_tokens,
         "sampling_params" : sampling_params
     }
 
@@ -344,7 +345,7 @@ def sequence_decode_step(token_id,sequence_state,params):
         params["Wq"],params["Wk"],params["Wv"],params["Wo"],
         blocks = sequence_state["blocks"],
         seq_len = sequence_state["pos"],
-        block_size = params.get("block_size",8)
+        block_size = sequence_state["blocks"][0]["K"].shape[0]
     )
     
     logits = linear_projection(hidden[0],params["W_out"])
@@ -354,70 +355,546 @@ def sequence_decode_step(token_id,sequence_state,params):
     
 # Step 29 - is_sequence_done
 # TODO: implement
-
-# Step 30 - generate_single_sequence (not yet solved)
+def is_sequence_done(sequence_state):
+    return sequence_state["done"]
+    
+# Step 30 - generate_single_sequence
 # TODO: implement
+def generate_single_sequence(request,params,eos_id,rng):
+    cache = init_kv_cache(params["max_seq_len"],params["d_model"])
 
-# Step 31 - build_batch_step_input (not yet solved)
+    logits = model_prefill(request["prompt_ids"],params,cache)
+    next_tok = greedy_select(logits)
+
+    pos = len(request["prompt_ids"])
+    output_ids = []
+    
+    while len(output_ids) < request["max_new_tokens"]:
+        output_ids.append(next_tok)
+
+        logits = model_decode_step(next_tok,params,cache,pos)
+        pos += 1
+
+        sampling = request["sampling_params"]
+        logits = apply_temperature(logits,sampling["temperature"])
+        logits = top_k_filter(logits,sampling["top_k"])
+        logits = top_p_filter(logits,sampling["top_p"])
+        probs = stable_softmax(logits)
+        next_tok = sample_from_probs(probs,rng)
+
+        if next_tok == eos_id:
+            break
+    return output_ids
+
+# Step 31 - build_batch_step_input
 # TODO: implement
+def build_batch_step_input(states):
+    token_ids = []
+    for state in states:
+        if not state["done"]:
+            token_ids.append(state["output_ids"][-1])
+    if not token_ids:
+        return None
+    return np.array(token_ids)
 
-# Step 32 - batched_decode_step (not yet solved)
+# Step 32 - batched_decode_step
 # TODO: implement
+def batched_decode_step(batch_tokens,states,params):
+    all_logits = []
+    j = 0
+    for i,state in enumerate(states):
+        if state["done"]:
+            all_logits.append(None)
+            continue
+        token_id = batch_tokens[j]
+        j += 1
+        logits = sequence_decode_step(token_id,state,params)
+        all_logits.append(logits)
+    return all_logits
 
-# Step 33 - static_batch_generate (not yet solved)
+# Step 33 - static_batch_generate
 # TODO: implement
+def static_batch_generate(requests,params,allocator,eos_id,rng):
+    states = [init_sequence_state(req,allocator,eos_id) for req in requests]
 
-# Step 34 - has_free_capacity (not yet solved)
+    for state in states:
+        prompt_ids = state["request"]["prompt_ids"]
+        block_size = state["blocks"][0]["K"].shape[0]
+
+        for i,tid in enumerate(prompt_ids):
+            X = embed_tokens(np.array([tid]),params["embedding"])
+            append_to_paged_cache(state["blocks"],(X @ params["Wk"])[0],(X @ params["Wv"])[0],i,block_size)
+
+        last_tid = prompt_ids[-1]
+        X = embed_tokens(np.array([last_tid]),params["embedding"])
+        K_hist,V_hist = gather_kv_from_blocks(state["blocks"],len(prompt_ids),block_size)
+        Q = X @ params["Wq"]
+        scale = 1.0 / np.sqrt(X.shape[-1])
+        scores = Q @ K_hist.T * scale
+        attn = stable_softmax(scores)
+        hidden = attn @ V_hist
+        logits = linear_projection(hidden[0],params["W_out"])
+
+        sampling = state["request"]["sampling_params"]
+        logits = apply_temperature(logits,sampling["temperature"])
+        logits = top_k_filter(logits,sampling["top_k"])
+        logits = top_p_filter(logits,sampling["top_p"])
+        probs = stable_softmax(logits)
+        next_tok = sample_from_probs(probs,rng)
+
+        state["output_ids"] = [next_tok]
+
+        if next_tok == eos_id:
+            state["done"] = True
+    
+    while not all(s["done"] for s in states):
+        batch_tokens = build_batch_step_input(states)
+        if batch_tokens is None:
+            break
+        all_logits = batched_decode_step(batch_tokens,states,params)
+
+        for i,state in enumerate(states):
+            if state["done"]:
+                continue
+
+            logits = all_logits[i]
+            sampling = state["request"]["sampling_params"]
+            logits = apply_temperature(logits,sampling["temperature"])    
+            logits = top_k_filter(logits,sampling["top_k"])
+            logits = top_p_filter(logits,sampling["top_p"])
+            probs = stable_softmax(logits)
+            next_tok = sample_from_probs(probs,rng)
+
+            state["output_ids"].append(next_tok)
+
+            if next_tok == eos_id or len(state["output_ids"]) >=state["request"]["max_new_tokens"]:
+                state["done"] = True
+    
+    results = []
+    for state in states:
+        results.append(state["output_ids"][:])
+        free_sequence_blocks(allocator,state["blocks"])
+
+    return results
+# Step 34 - has_free_capacity
 # TODO: implement
+def has_free_capacity(server_state):
+    return len(server_state["running"]) < server_state["max_running"]
 
-# Step 35 - continuous_batch_step (not yet solved)
+# Step 35 - continuous_batch_step
 # TODO: implement
+def continuous_batch_step(server_state,params,allocator,sampling_cfg):
+    eos_id = server_state["eos_token_id"]
 
-# Step 36 - run_continuous_batching (not yet solved)
+    still_running = []
+    for state in server_state["running"]:
+        if state["done"]:
+            free_sequence_blocks(allocator,state["blocks"])
+            rid = state["request"]["id"]
+            server_state["outputs"][rid] = state["output_ids"]
+        else:
+            still_running.append(state)
+    server_state["running"] = still_running
+
+    while has_free_capacity(server_state) and server_state["waiting_heap"]:
+        req = server_state["waiting_heap"].pop(0)
+        state = init_sequence_state(req,allocator,eos_id)
+
+        prompt_ids = state["request"]["prompt_ids"]
+        block_size = state["blocks"][0]["K"].shape[0]
+        for i,tid in enumerate(prompt_ids):
+            X = embed_tokens(np.array([tid]),params["embedding"])
+            append_to_paged_cache(
+                state["blocks"],
+                (X @ params["Wk"])[0],
+                (X @ params["Wv"])[0],
+                i,block_size,
+            )
+
+        last_tid = prompt_ids[-1]
+        X = embed_tokens(np.array([last_tid]),params["embedding"])
+        K_hist,V_hist = gather_kv_from_blocks(state["blocks"],len(prompt_ids),block_size)
+        Q = X @ params["Wq"]
+        scale = 1.0 / np.sqrt(X.shape[-1])
+        scores = Q @ K_hist.T * scale
+        attn = stable_softmax(scores)
+        hidden = attn @ V_hist
+        logits = linear_projection(hidden[0],params["W_out"])
+
+        logits = apply_temperature(logits, sampling_cfg["temperature"])
+        logits = top_k_filter(logits, sampling_cfg["top_k"])
+        logits = top_p_filter(logits, sampling_cfg["top_p"])
+        probs = stable_softmax(logits)
+        next_tok = sample_from_probs(probs, sampling_cfg["rng"])
+
+        state["output_ids"] = [next_tok]
+        if next_tok == eos_id:
+            state["done"] = True
+
+        server_state["running"].append(state)
+
+    if not server_state["running"]:
+        return
+
+    batch_tokens = build_batch_step_input(server_state["running"])
+    if server_state["tick"] < 5 and batch_tokens is not None:
+        print(f"DEBUG decode: batch_tokens={batch_tokens.tolist()} states={[s['request']['id'] for s in server_state['running']]}")
+    if batch_tokens is None:
+        return
+
+    all_logits = batched_decode_step(batch_tokens,server_state["running"],params)
+
+    for i,state in enumerate(server_state["running"]):
+        if state["done"]:
+            continue
+        logits = all_logits[i]
+        logits = apply_temperature(logits,sampling_cfg["temperature"])
+        logits = top_k_filter(logits, sampling_cfg["top_k"])
+        logits = top_p_filter(logits, sampling_cfg["top_p"])
+        probs = stable_softmax(logits)
+        next_tok = sample_from_probs(probs, sampling_cfg["rng"])
+
+        state["output_ids"].append(next_tok)
+
+        if next_tok == eos_id or len(state["output_ids"]) >= state["request"]["max_new_tokens"]:
+            state["done"] = True
+    server_state["tick"] += 1
+
+# Step 36 - run_continuous_batching
 # TODO: implement
+def run_continuous_batching(server_state,params,allocator,sampling_cfg,max_steps):
+    for step in range(max_steps):
+        continuous_batch_step(server_state,params,allocator,sampling_cfg)
 
-# Step 37 - priority_queue_push (not yet solved)
+        if not server_state["waiting_heap"] and not server_state["running"]:
+            break
+    
+# Step 37 - priority_queue_push
 # TODO: implement
+def priority_queue_push(server_state,request,priority):
+    heap = server_state["waiting_heap"]
+    request["priority"] = priority
+    i=0
+    while i<len(heap) and heap[i]["priority"] >= priority:
+        i+=1
+    heap.insert(i,request)
 
-# Step 38 - priority_queue_pop (not yet solved)
+# Step 38 - priority_queue_pop
 # TODO: implement
+def priority_queue_pop(server_state):
+    if not server_state["waiting_heap"]:
+        return None
+    return server_state["waiting_heap"].pop(0)
 
-# Step 39 - select_admissions (not yet solved)
+# Step 39 - select_admissions
 # TODO: implement
+def select_admissions(server_state,allocator):
+    admissions = []
+    free_blocks = allocator["num_blocks"] - kv_blocks_in_use(allocator)
+    while has_free_capacity(server_state) and server_state["waiting_heap"]:
+        req = server_state["waiting_heap"][0]
+        n_blocks = blocks_needed(len(req["prompt_ids"]),allocator["block_size"])
 
-# Step 40 - preempt_sequence (not yet solved)
+        if n_blocks <= free_blocks:
+            free_blocks -= n_blocks
+            admissions.append(server_state["waiting_heap"].pop(0))
+        else:
+            break
+
+    return admissions
+
+# Step 40 - preempt_sequence
 # TODO: implement
+def preempt_sequence(server_state,allocator):
+    running = server_state["running"]
+    if not running:
+        return None
+    
+    lowest = min(running,key=lambda s: s["request"].get("priority",0))
+    free_sequence_blocks(allocator,lowest["blocks"])
+    running.remove(lowest)
+    server_state["waiting_heap"].insert(0,lowest["request"])
 
-# Step 41 - schedule_step (not yet solved)
+    return lowest["request"]["id"]
+
+# Step 41 - schedule_step
 # TODO: implement
+def schedule_step(server_state,params,allocator,sampling_cfg):
+    eos_id = server_state["eos_token_id"]
 
-# Step 42 - format_stream_chunk (not yet solved)
+    still_running = []
+    for state in server_state["running"]:
+        if state["done"]:
+            free_sequence_blocks(allocator,state["blocks"])
+            rid = state["request"]["id"]
+            server_state["outputs"][rid] = state["output_ids"]
+            if "timestamps" in server_state and rid in server_state["timestamps"]:
+                server_state["timestamps"][rid]["completed_at"] = time.perf_counter()
+        else:
+            still_running.append(state)
+    server_state["running"] = still_running
+
+    admissions = select_admissions(server_state,allocator)
+    for req in admissions:
+        state = init_sequence_state(req,allocator,eos_id)
+        prompt_ids = state["request"]["prompt_ids"]
+        block_size = state["blocks"][0]["K"].shape[0]
+
+        # 手动填入所有 prompt token 的 K/V
+        for i,tid in enumerate(prompt_ids):
+            X = embed_tokens(np.array([tid]),params["embedding"])
+            append_to_paged_cache(
+                state["blocks"],
+                (X @ params["Wk"])[0],
+                (X @ params["Wv"])[0],
+                i,block_size,
+            )
+
+        # 手动算最后一个 prompt token 的 attention（不用 paged_attention_step）
+        last_tid = prompt_ids[-1]
+        X = embed_tokens(np.array([last_tid]),params["embedding"])
+        K_hist, V_hist = gather_kv_from_blocks(state["blocks"], len(prompt_ids), block_size)
+        Q = X @ params["Wq"]
+        scale = 1.0 / np.sqrt(X.shape[-1])
+        scores = Q @ K_hist.T * scale
+        attn = stable_softmax(scores)
+        hidden = attn @ V_hist
+        logits = linear_projection(hidden[0],params["W_out"])
+
+        logits = apply_temperature(logits, sampling_cfg["temperature"])
+        logits = top_k_filter(logits, sampling_cfg["top_k"])
+        logits = top_p_filter(logits, sampling_cfg["top_p"])
+        probs = stable_softmax(logits)
+        next_tok = sample_from_probs(probs, sampling_cfg["rng"])
+
+        state["output_ids"] = [next_tok]
+        if next_tok == eos_id:
+            state["done"] = True
+
+        # 记录首 token 时间
+        rid = state["request"]["id"]
+        if "timestamps" in server_state and rid in server_state["timestamps"]:
+            server_state["timestamps"][rid]["first_token_at"] = time.perf_counter()
+
+        server_state["running"].append(state)
+
+    if not server_state["running"]:
+        server_state["tick"] += 1
+        return
+    batch_tokens = build_batch_step_input(server_state["running"])
+    if batch_tokens is None:
+        server_state["tick"] += 1
+        return
+    all_logits = batched_decode_step(batch_tokens,server_state["running"],params)
+
+    for i, state in enumerate(server_state["running"]):
+        if state["done"]:
+            continue
+
+        logits = all_logits[i]
+        logits = apply_temperature(logits, sampling_cfg["temperature"])
+        logits = top_k_filter(logits, sampling_cfg["top_k"])
+        logits = top_p_filter(logits, sampling_cfg["top_p"])
+        probs = stable_softmax(logits)
+        next_tok = sample_from_probs(probs, sampling_cfg["rng"])
+
+        state["output_ids"].append(next_tok)
+
+        if next_tok == eos_id or len(state["output_ids"]) >= state["request"]["max_new_tokens"]:
+            state["done"] = True
+    server_state["tick"] += 1
+# Step 42 - format_stream_chunk
 # TODO: implement
-
-# Step 43 - submit_request (not yet solved)
+def format_stream_chunk(request_id,token,done):
+    return {
+        "id":request_id,
+        "token":token,
+        "done":done,
+    }
+# Step 43 - submit_request
 # TODO: implement
+def submit_request(server_state,prompt,max_new_tokens,priority,vocab):
+    rid = f"req-{server_state['next_request_id']}"
+    server_state["next_request_id"] += 1
 
-# Step 44 - drive_until_complete (not yet solved)
+    prompt_ids = encode_prompt(prompt,vocab,add_bos=True)
+
+    sampling_params = {
+        "temperature" : 1.0,
+        "top_k" : 5,
+        "top_p" : 0.9,
+        "rng" : server_state["rng"],
+    }
+    
+    req = make_request(rid,prompt_ids,max_new_tokens,sampling_params)
+    priority_queue_push(server_state,req,priority)
+    server_state["streams"][rid] = []
+
+    if "timestamps" not in server_state:
+        server_state["timestamps"] = {}
+    server_state["timestamps"][rid] = {"submitted_at": time.perf_counter()}
+
+    return rid
+# Step 44 - drive_until_complete
 # TODO: implement
-
-# Step 45 - collect_request_output (not yet solved)
+def drive_until_complete(server_state,params,allocator,sampling_cfg,vocab,max_steps):
+    for _ in range(max_steps):
+        schedule_step(server_state,params,allocator,sampling_cfg)
+        
+        if not server_state["waiting_heap"] and not server_state["running"]:
+            break
+# Step 45 - collect_request_output
 # TODO: implement
+def collect_request_output(server_state,request_id):
+    output_ids = server_state["outputs"].get(request_id)
+    if output_ids is None:
+        return None
+    return {
+        "request_id": request_id,
+        "output_ids": output_ids,
+    }
 
-# Step 46 - build_completion_response (not yet solved)
+# Step 46 - build_completion_response
 # TODO: implement
-
-# Step 47 - time_to_first_token (not yet solved)
+def build_completion_response(server_state,request_id,vocab):
+    output = collect_request_output(server_state,request_id)
+    if output is None:
+        return None
+    text = decode_tokens(output["output_ids"],vocab)
+    return {
+        "request_id":request_id,
+        "text": text,
+        "token_count": len(output["output_ids"]),
+    }
+# Step 47 - time_to_first_token
 # TODO: implement
-
-# Step 48 - inter_token_latency (not yet solved)
+def time_to_first_token(server_state,request_id):
+    timestamps = server_state.get("timestamps",{}).get(request_id)
+    if timestamps is None:
+        return None
+    return timestamps.get("first_token_at",0) - timestamps.get("submitted_at",0)
+# Step 48 - inter_token_latency
 # TODO: implement
-
-# Step 49 - aggregate_throughput (not yet solved)
+def inter_token_latency(server_state,request_id):
+    timestamps = server_state.get("timestamps",{}).get(request_id)
+    output = server_state["outputs"].get(request_id)
+    if timestamps is None or output is None:
+        return
+    
+    completed = timestamps.get("completed_at")
+    first = timestamps.get("first_token_at")
+    if completed is None or first is None:
+        return 
+    total_time = completed - first
+    n_intervals = len(output)-1
+    if n_intervals < 1:
+        return 
+    
+    return total_time / n_intervals
+# Step 49 - aggregate_throughput
 # TODO: implement
+def aggregate_throughput(server_state):
+    outputs = server_state.get("outputs",{})
+    timestamps = server_state.get("timestamps",{})
+    if not outputs or not timestamps:
+        return None
+    total_tokens = 0
+    min_submit = float("inf")
+    max_complete = 0
 
-# Step 50 - latency_percentiles (not yet solved)
+    for rid,ids in outputs.items():
+        total_tokens += len(ids)
+        ts = timestamps.get(rid)
+        if ts:
+            if ts.get("submitted_at",float("inf")) < min_submit:
+                min_submit = ts["submitted_at"]
+            if ts.get("completed_at",0) > max_complete:
+                max_complete = ts["completed_at"]
+    
+    total_time = max_complete - min_submit
+    if total_time <= 0:
+        return None
+    
+    return {
+        "total_tokens": total_tokens,
+        "total_time": round(total_time,4),
+        "throughput": round(total_tokens / total_time,2),
+        "num_requests": len(outputs),
+    }
+# Step 50 - latency_percentiles
 # TODO: implement
+def latency_percentiles(server_state):
+    timestamps = server_state.get("timestamps",{})
+    latencies = []
+    for _,ts in timestamps.items():
+        sub = ts.get("submitted_at")
+        com = ts.get("completed_at")
+        if sub is not None and com is not None:
+            latencies.append(com - sub)
+    if not latencies:
+        return
+    
+    latencies.sort()
+    n = len(latencies)
 
-# Step 51 - run_throughput_latency_benchmark (not yet solved)
+    def percentile(p):
+        k = (n-1)*p/100
+        f = int(k)
+        c = k - f
+        if f+1 < n:
+            return latencies[f] * (1-c) + latencies[f+1] * c
+        return latencies[f]
+    
+    return {
+        "p50":round(percentile(50),4),
+        "p90":round(percentile(90),4),
+        "p99":round(percentile(99),4),
+        "min":round(latencies[0],4),
+        "max":round(latencies[-1],4)
+    }
+# Step 51 - run_throughput_latency_benchmark
 # TODO: implement
+def run_throughput_latency_benchmark(params,allocator,vocab,prompts,sampling_cfg,
+                                     max_new_tokens,max_steps):
+    eos_id = vocab["token_to_id"]["<eos>"]
+    server_state = {
+        "waiting_heap": [],
+        "running": [],
+        "next_request_id":0,
+        "outputs":{},
+        "streams":{},
+        "timestamps":{},
+        "events":[],
+        "eos_token_id":eos_id,
+        "block_size":allocator["block_size"],
+        "max_running":4,
+        "rng":sampling_cfg["rng"],
+        "tick":0,
+    }
 
+    for i,p in enumerate(prompts):
+        submit_request(server_state,p,max_new_tokens,i,vocab)
+    drive_until_complete(server_state,params,allocator,sampling_cfg,vocab,max_steps)
+    ttft_list = []
+    itl_list = []
+    for rid in server_state["outputs"]:
+        ttft = time_to_first_token(server_state,rid)
+        itl = inter_token_latency(server_state,rid)
+        if ttft is not None:
+            ttft_list.append(ttft)
+        if itl is not None:
+            itl_list.append(itl)
+    
+    agg = aggregate_throughput(server_state)
+    perc = latency_percentiles(server_state)
+
+    return {
+        "avg_ttft": round(sum(ttft_list)/len(ttft_list),4) if ttft_list else None,
+        "avg_itl": round(sum(itl_list)/len(itl_list),4) if itl_list else None,
+        "throughput":agg["throughput"] if agg else None,
+        "p50_latency": perc["p50"] if perc else None,
+        "p90_latency": perc["p90"] if perc else None,
+        "p99_latency": perc["p99"] if perc else None,
+        "num_requests": len(prompts),
+        "total_tokens":agg["total_tokens"] if agg else 0,
+    }
